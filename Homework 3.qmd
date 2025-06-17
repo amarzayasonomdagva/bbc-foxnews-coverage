@@ -1,0 +1,292 @@
+---
+title: "Homework 3"
+format: html
+editor: visual
+---
+
+## Homework 3
+
+We webscraped a set of articles from BBC and Fox News, gathering 79 observations from BBC and 97 observations from Fox. The articles vary in publication date, ranging from recent posts to ones published up to 10 years ago. For the purpose of this assignment, we aim to predict the general sentiment of these articles and investigate whether there are notable differences between the two sources. My initial expectation is that Fox News’ coverage of international students may be more negative and less promising compared to BBC’s. If the model fails to pick up on any difference, it may suggest that there is, in fact, little to no difference between the two sources. Before building the model, we first explore and clean the datasets.
+
+However, filtering based on keywords initially failed because each row contained full paragraphs, which makes it difficult to isolate and remove unwanted phrases. Therefore, I split the text into individual sentences and filtered out any sentences containing words like “subscribe,” “newsletter,” “all rights reserved,” and similar terms. This stage focused solely on cleaning the dataset. I asked chatgpt to help me with splitting up the sentences, so it suggested that I use tokenize_sentences command. After cleaning, i have 1546 observations for bbc and 2410 observations for fox.
+
+```{r}
+library(rvest)
+library(tidytext)
+library(tidyverse)
+library(stringr)
+library(tokenizers)
+library(SnowballC)
+library(dendextend)
+
+
+first_fox <- read_csv("~/Downloads/amuna_data.csv")
+fox_sentences <- first_fox |>
+  mutate(sentences = tokenize_sentences(article_text)) |>
+  unnest(sentences)
+
+
+fox_sentences1 <- first_fox |>
+  mutate(sentences = tokenize_sentences(article_text)) |> 
+  unnest(sentences) |>
+  filter(!str_detect(sentences, regex("subscribe|newsletter|CLICK HERE|This material|powered|FactSet|All rights|Fox|Legal Statement|Copyright", ignore_case = TRUE)))
+
+
+#count the lengths of the articles -- average?
+bbc_first <- read_csv("~/Downloads/Amuna_final.csv")
+
+bbc_sentences <- bbc_first |>
+  mutate(sentences = tokenize_sentences(bbc_text_full)) |>
+  unnest(sentences) |>
+  filter(!str_detect(sentences, regex("subscribe|newsletter|CLICK HERE|This material|powered|FactSet|All rights|bbc|Legal Statement|Copyright", ignore_case = TRUE)))
+
+```
+
+Now, we explore the word frequencies in each dataset. The most common words are fairly similar across both sources and include generic terms such as student, international, visa, university, intern, and school. However, an interesting difference emerges: Fox’s list of top words does not include Trump, while BBC’s does. Additionally, BBC’s top words include government and US, whereas Fox features U.S. instead.
+
+```{r}
+#breaking it up into words to look at word frequency
+bbc_sentences_words <- bbc_sentences  |>
+  unnest_tokens(input = "sentences",
+                output = "Word") |>
+  filter(!(Word %in% stop_words$word))
+
+bbc_sentences_words |>
+  count(Word) |>
+  arrange(-n) |>
+  slice_head(n = 15) |>
+  ggplot() +
+  geom_col(aes(x = n, y = reorder(Word, n))) + 
+  labs(title = "Top 15 Most Common Words in BBC",
+       x = "Word",
+       y = "Count")
+
+#do the same for fox news
+
+fox_sentences_words <- fox_sentences  |>
+  select(-final_dates) |>
+  unnest_tokens(input = "sentences",
+                output = "Word") |>
+  filter(!(Word %in% stop_words$word)) 
+
+fox_sentences_words |>
+  count(Word) |>
+  arrange(-n) |>
+  slice_head(n = 15) |>
+  ggplot() +
+  geom_col(aes(x = n, y = reorder(Word, n))) + 
+  labs(title = "Top 15 Most Common Words in Fox",
+       x = "Word",
+       y = "Count")
+
+```
+
+## Unsupervised learning
+
+```{r}
+
+#Combining the two datasets I cleaned
+
+fox_sentences_words <- fox_sentences_words |>
+  mutate(source = "Fox")
+
+bbc_sentences_words <- bbc_sentences_words |>
+  mutate(source = "BBC")
+
+combined_text_words <- bind_rows(
+  bbc_sentences_words |> rename(article_text = bbc_text_full),
+  fox_sentences_words)
+
+dfm_articlesss <- combined_text_words |>
+  filter(!(Word %in% stop_words$word)) |>
+  rename(my_source = "source") |>
+  pivot_wider(
+    id_cols = c(my_source, article_text),
+    names_from = "Word",
+    values_from = "Word",
+    values_fill = 0,
+    values_fn = length
+  )
+
+#Visualizing Clustering 
+dfm_numeric <- dfm_articlesss |> 
+  select(where(is.numeric))
+
+article_dend <- dfm_numeric |> 
+  scale() |> 
+  dist() |> 
+  hclust() |>
+  as.dendrogram()
+
+labels <- paste(dfm_articlesss$my_source, sep = " - ")
+
+my_colors <- ifelse(dfm_articlesss$my_source == "BBC",
+                    "red",
+                    "blue")
+
+article_dend |>
+  color_branches(col = my_colors[order.dendrogram(article_dend)]) |>
+  color_labels(col = my_colors[order.dendrogram(article_dend)]) |>
+  plot(main = "Relationship between Fox News and BBC Articles")
+
+
+#k-means clustering
+set.seed(123)
+K <- 4
+
+kmeans_result <- kmeans(scale(dfm_numeric), centers = K)
+
+dfm_top_words_with_cluster <- dfm_articlesss |> 
+  mutate(cluster = factor(kmeans_result$cluster))
+
+#Find the most optimal k
+
+for(K in 1:163){
+  kmeans_result <- kmeans(scale(dfm_numeric), centers = K)
+  tot_within_ss[K] <-  kmeans_result$tot.withinss
+}
+
+plot(1:163, tot_within_ss,
+     main = "Elbow Plot to Determine Optimal K",
+     xlab = "Number of clusters",
+     ylab = "Total Within-Cluster Sum of squares")
+
+#Since after around k=30, the curve is visibly becoming more flat, let's only look at points up until then.
+plot(1:30, tot_within_ss[1:30], type = "b",
+     main = "Elbow Plot to Determine Optimal K=>30",
+     xlab = "Number of clusters",
+     ylab = "Total Within-Cluster Sum of squares")
+
+plot(1:10, tot_within_ss[1:10], type = "b",
+     main = "Elbow Plot to Determine Optimal K=>10",
+     xlab = "Number of clusters",
+     ylab = "Total Within-Cluster Sum of squares")
+
+#choosing k=4
+
+dfm_top_words_with_cluster |>
+  group_by(cluster) |>
+  count() 
+
+
+```
+
+The hierarchical clustering we did are based on similarities in word usage related to international students. Each branch on the dendrogram represents an article, and the height at which branches merge reflects how different the articles are. We can observe that articles from the same source (BBC or Fox News) generally cluster together, suggesting that BBC and Fox often use different language and focus on different aspects when reporting on international students. However, the separation is not perfect. A few articles from BBC and Fox appear in clusters dominated by the other source. This indicates that while source-specific styles are strong, there seems to be overlaps because certain articles may emphasize similar topics which leads to some linguistic similarities. Overall, the clustering highlights a strong distinction between BBC and Fox News coverage.
+
+I tried using k-means clustering, but it didn’t work well. I plotted the elbow plot to determine the most optimal k using the for-loop. Almost all of the articles (161 out of 164) were placed into one group. This shows that the articles use very similar words, so the algorithm couldn’t find clear differences. I had hoped to see more distinct clusters, but there wasn’t much variation to work with. The homogeneity in vocabulary makes k-means clustering not very effective in this context.
+
+## PCA
+
+```{r}
+
+pca_articles <- prcomp(dfm_articlesss |> select(-article_text, -my_source) , scale = TRUE)
+
+#First PCA
+pca_articles$rotation[,"PC1"] |>
+  sort(decreasing = TRUE) |>
+  head(5)
+
+pca_articles$rotation[,"PC1"] |>
+  sort(decreasing = FALSE) |>
+  head(5)
+
+combined_text_words |> 
+  filter(str_detect(Word, "linking")) |> 
+  count(source)
+
+combined_text_words |> 
+  filter(str_detect(Word, "approach")) |> 
+  count(source)
+
+# Second Principal Component
+pca_articles$rotation[,"PC2"] |>
+  sort(decreasing = TRUE) |>
+  head(5)
+
+pca_articles$rotation[,"PC2"] |>
+  sort(decreasing = FALSE) |>
+  head(5)
+
+# Third Principal Component
+pca_articles$rotation[,"PC3"] |>
+  sort(decreasing = TRUE) |>
+  head(5)
+
+pca_articles$rotation[,"PC3"] |>
+  sort(decreasing = FALSE) |>
+  head(5)
+
+# Fourth Principal Component
+pca_articles$rotation[,"PC4"] |>
+  sort(decreasing = TRUE) |>
+  head(5)
+
+pca_articles$rotation[,"PC4"] |>
+  sort(decreasing = FALSE) |>
+  head(5)
+
+
+```
+
+Now, we're onto PCA! 
+
+To better understand the meaning of each PCA, I looked at the words with the highest and lowest loadings for PC1 to PC4. These words are the most strongly associated with each component. For example, PC1 includes words like linking, approach, and external, which may relate to formal or academic language, while its negative side includes names like irina and tsukerman, which might because of more article-specific content. Both linking and approach were mentioned 80-90 times, while Fox had barely any mention of these words.
+
+PC2 highlights words like implemented, mutual, and published on the positive end, which may reflect policy or official actions. On the negative side, it includes strategist, hostility, and myth, which may point to very opinion-based content. It could be due to poor cleaning of data, where one article had more ads captured than the other. In that case, manually building the dataset could've been a better option.
+
+PC3 emphasizes tourism, canadians, and americans.as, which suggests that there is a focus on nationality and travel topics. While its negative side again contains names and political keywords like yoon and korea’s, which is one full article that are very different from the others. I think it got captured accidentally while we were web-scrapping. I think setting limits and choosing articles that contain at least mentioning students 3 times and international 3 times will make the dataset more precise. 
+
+Finally, PC4 includes terms like market, data, and mutual on the positive end, while its negative end contains words like earthquake, structures, and mandalay, which seem more related to natural disasters or location-specific news. I think given how words in the negative spectrum is kind of related, it may be one article that the algorithm is catching that is very distinct from the rest. 
+
+Overall, the components suggest a contrast between formal/policy language, geographic references, and article-specific names or topics.
+
+## Supervised Model
+
+```{r}
+library(ranger)
+rf1 <- ranger(factor(my_source) ~ PC1_score + PC2_score + PC3_score + PC4_score, 
+              data = dfm_articlesss |>
+                mutate(PC1_score = pca_articles$x[,"PC1"],
+                       PC2_score = pca_articles$x[,"PC2"],
+                       PC3_score = pca_articles$x[,"PC3"],
+                       PC4_score = pca_articles$x[,"PC4"]),
+              importance = "impurity")
+
+rf1$confusion.matrix
+
+rf1$variable.importance
+
+```
+Using a random forest model with the first four PCA as predictors, the classifier achieved pretty high accuracy in distinguishing between BBC and Fox articles. Out of 164 articles, only 7 were misclassified.
+
+The variable importance scores show that PC2 and PC4 contributed the most to the model’s performance, which suggests that the types of words associated with these components, such as implemented, published, and market, are key to differentiating between the two sources. PC1 and PC3 were less influential but still provided some useful information for classification.
+
+
+## Visualization
+
+```{r}
+
+plot_data <- dfm_articlesss |>
+  mutate(
+    PC2 = pca_articles$x[, "PC2"],
+    PC4 = pca_articles$x[, "PC4"]
+  )
+
+plot_data |>
+  ggplot() +
+  geom_point(aes(x = PC2, y = PC4, color = my_source), size = 3, alpha = 0.7) +
+  coord_cartesian(xlim = c(-20, 20), ylim = c(-20, 20)) + #had to ask chatgpt to help me zoom this in because too spread out
+  labs(
+    title = "Separation of BBC and Fox News Articles (Zoomed)",
+    x = "PCA 2",
+    y = "PCA 4",
+    color = "Source"
+  ) +
+  theme_minimal() +
+  scale_color_manual(values = c("green", "orange"))
+
+
+```
+The scatterplot shows the separation between BBC and Fox articles based on their scores from PCA2 and PCA4.
+Although there is some overlap between the two groups, Fox articles (orange) tend to cluster more toward higher PC2 and PC4 values, while BBC articles (green) are more spread out across lower and middle values. This visual separation supports the random results, showing that there are meaningful language differences between the two sources that can be captured through PCA. These results suggest that BBC and Fox News use different language styles when discussing international students. 
+
